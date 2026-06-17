@@ -1,0 +1,34 @@
+{
+  "name": "txdna-agent-framework",
+  "version": "1.0.0",
+  "description": "Multi-agent engineering team for TransactionDNA and EnterpriseOS",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "workflow:feature": "tsx index.ts --workflow feature-design",
+    "workflow:microservice": "tsx index.ts --workflow microservice-design",
+    "workflow:review": "tsx index.ts --workflow code-review",
+    "workflow:deployment": "tsx index.ts --workflow deployment-readiness",
+    "workflow:implementation": "tsx index.ts --workflow implementation-planning",
+    "ui:dev": "cd ui && npm run dev",
+    "ui:build": "cd ui && npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8",
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "ora": "^8.0.1",
+    "winston": "^3.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.3",
+    "tsx": "^4.16.2"
+  }
+}
