@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { AgentConfig, WorkflowRun, RiskEntry, SystemConfig, WorkflowType } from '../types.ts';
+import type { AgentConfig, WorkflowRun, RiskEntry, SystemConfig, WorkflowType, ProviderStatus } from '../types.ts';
 
 const api = axios.create({ baseURL: '/api' });
 
@@ -39,4 +39,9 @@ export const configApi = {
     api.get('/config').then(r => r.data),
   update: (config: Partial<SystemConfig>): Promise<SystemConfig> =>
     api.patch('/config', config).then(r => r.data),
+};
+
+export const providerApi = {
+  status: (): Promise<ProviderStatus> =>
+    api.get('/provider/status').then(r => r.data),
 };

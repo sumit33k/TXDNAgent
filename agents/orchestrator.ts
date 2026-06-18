@@ -1,16 +1,16 @@
-import Anthropic from '@anthropic-ai/sdk';
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import type {
   AgentDefinition,
-  AgentRunConfig,
   WorkflowInput,
   WorkflowResult,
   StepResult,
   AuditEntry,
   OrchestratorConfig,
 } from './types.js';
+import type { LlmProvider, ProviderMessage } from './llm/types.js';
+import { createProvider, resolveModel } from './llm/provider-factory.js';
 import { buildRepositoryContextTools, executeRepositoryTool } from './tools/repository-context.js';
 import { addRisk } from './tools/risk-register.js';
 import { getArchitectureContext } from './tools/architecture-map.js';
@@ -19,18 +19,16 @@ import { loadContextFiles } from './context-loader.js';
 const AUDIT_LOG_PATH = path.join(process.cwd(), 'logs', 'audit-trail.jsonl');
 
 export class AgentOrchestrator {
-  private client: Anthropic;
+  private provider: LlmProvider;
   private config: OrchestratorConfig;
   private contextFiles: Record<string, string>;
-  private tools: Anthropic.Tool[];
+  private toolDefs: ReturnType<typeof buildRepositoryContextTools>;
 
   constructor(config: OrchestratorConfig) {
-    this.client = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
+    this.provider = createProvider(config.llmProvider);
     this.config = config;
     this.contextFiles = loadContextFiles();
-    this.tools = buildRepositoryContextTools() as Anthropic.Tool[];
+    this.toolDefs = buildRepositoryContextTools();
   }
 
   async runWorkflow(
@@ -38,17 +36,15 @@ export class AgentOrchestrator {
     steps: Array<{ agentName: string; agent: AgentDefinition; taskPrompt: string }>
   ): Promise<WorkflowResult> {
     const workflowId = randomUUID();
-    const startedAt = new Date().toISOString();
 
     const result: WorkflowResult = {
       workflowType: input.type,
-      startedAt,
+      startedAt: new Date().toISOString(),
       status: 'running',
       steps: [],
     };
 
-    const stepOutputs: Record<string, string> = {};
-    stepOutputs['workflow_input'] = input.description;
+    const stepOutputs: Record<string, string> = { workflow_input: input.description };
 
     for (const step of steps) {
       const stepResult: StepResult = {
@@ -62,12 +58,7 @@ export class AgentOrchestrator {
         const systemPrompt = this.buildSystemPrompt(step.agent);
         const userPrompt = this.buildUserPrompt(step.taskPrompt, stepOutputs);
 
-        const output = await this.runAgent(
-          step.agentName,
-          systemPrompt,
-          userPrompt,
-          workflowId
-        );
+        const output = await this.runAgent(step.agentName, systemPrompt, userPrompt, workflowId);
 
         stepResult.output = output;
         stepResult.status = 'completed';
@@ -104,7 +95,6 @@ export class AgentOrchestrator {
 
     result.completedAt = new Date().toISOString();
     result.status = result.errors?.length ? 'failed' : 'completed';
-
     return result;
   }
 
@@ -112,49 +102,46 @@ export class AgentOrchestrator {
     agentName: string,
     systemPrompt: string,
     userPrompt: string,
-    workflowId: string
+    _workflowId: string
   ): Promise<string> {
-    const model = this.selectModel(agentName);
-    const messages: Anthropic.MessageParam[] = [
-      { role: 'user', content: userPrompt },
-    ];
+    const model = resolveModel(agentName, this.provider, {
+      orchestrator: this.config.orchestratorModel,
+      specialist: this.config.specialistModel,
+      reviewer: this.config.reviewerModel,
+    });
 
-    let fullOutput = '';
+    // When the provider doesn't support tool use, inject repository context
+    // into the system prompt so the agent still has structural awareness.
+    const effectiveSystem = this.provider.supportsToolUse
+      ? systemPrompt
+      : systemPrompt + '\n\n' + this.buildNoToolFallbackContext();
+
+    const messages: ProviderMessage[] = [{ role: 'user', content: userPrompt }];
     const maxTurns = parseInt(process.env.MAX_AGENT_TURNS ?? '20', 10);
+    let fullOutput = '';
 
     for (let turn = 0; turn < maxTurns; turn++) {
-      const response = await this.client.messages.create({
+      const response = await this.provider.sendMessage({
         model,
-        max_tokens: 8096,
-        system: systemPrompt,
-        tools: this.tools,
+        system: effectiveSystem,
         messages,
+        tools: this.provider.supportsToolUse ? this.toolDefs : [],
+        maxTokens: 8096,
       });
 
-      const textParts = response.content
-        .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-        .map(b => b.text);
+      if (response.text) fullOutput += response.text;
 
-      if (textParts.length > 0) {
-        fullOutput += textParts.join('\n');
-      }
+      if (response.stopReason === 'end_turn') break;
 
-      if (response.stop_reason === 'end_turn') break;
+      if (response.stopReason === 'tool_use' && response.toolCalls.length > 0) {
+        messages.push(response.assistantMessage);
 
-      if (response.stop_reason === 'tool_use') {
-        const toolUseBlocks = response.content.filter(
-          (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
-        );
-
-        messages.push({ role: 'assistant', content: response.content });
-
-        const toolResults: Anthropic.ToolResultBlockParam[] = toolUseBlocks.map(tu => ({
-          type: 'tool_result' as const,
-          tool_use_id: tu.id,
-          content: executeRepositoryTool(tu.name, tu.input as Record<string, unknown>),
+        const toolResults = response.toolCalls.map(tc => ({
+          toolUseId: tc.id,
+          content: executeRepositoryTool(tc.name, tc.input),
         }));
 
-        messages.push({ role: 'user', content: toolResults });
+        messages.push(this.provider.buildToolResultMessage(toolResults));
         continue;
       }
 
@@ -164,28 +151,36 @@ export class AgentOrchestrator {
     return fullOutput;
   }
 
+  /** Context injected into system prompt when tool use is disabled (e.g. small local models). */
+  private buildNoToolFallbackContext(): string {
+    return [
+      '## Repository Context (pre-loaded — tool use not available for this model)',
+      getArchitectureContext(),
+      '',
+      '> Note: You cannot call repository tools directly. Reference the architecture map above',
+      '> and ask the user to provide specific file contents if needed.',
+    ].join('\n');
+  }
+
   private buildSystemPrompt(agent: AgentDefinition): string {
-    const contextMd = this.contextFiles;
+    const ctx = this.contextFiles;
     return [
       agent.systemPrompt,
       '',
       '---',
       '## Platform Context',
-      contextMd['transaction-dna-context'] ?? '',
+      ctx['transaction-dna-context'] ?? '',
       '',
-      contextMd['enterpriseos-context'] ?? '',
+      ctx['enterpriseos-context'] ?? '',
       '',
-      contextMd['shared-engineering-rules'] ?? '',
+      ctx['shared-engineering-rules'] ?? '',
       '',
       '---',
       getArchitectureContext(),
     ].join('\n');
   }
 
-  private buildUserPrompt(
-    taskPrompt: string,
-    priorOutputs: Record<string, string>
-  ): string {
+  private buildUserPrompt(taskPrompt: string, priorOutputs: Record<string, string>): string {
     const priorContext = Object.entries(priorOutputs)
       .filter(([k]) => k !== 'workflow_input')
       .map(([k, v]) => `### Output from ${k}:\n${v.slice(0, 3000)}`)
@@ -197,39 +192,21 @@ export class AgentOrchestrator {
     ].filter(Boolean).join('\n\n');
   }
 
-  private selectModel(agentName: string): string {
-    if (agentName === 'engineering-orchestrator') {
-      return this.config.orchestratorModel;
-    }
-    if (agentName === 'code-reviewer' || agentName === 'security-engineer') {
-      return this.config.reviewerModel;
-    }
-    return this.config.specialistModel;
-  }
-
   private outputRequiresApproval(output: string): boolean {
-    return output.includes('[REQUIRES HUMAN APPROVAL]') ||
-      output.includes('[REQUIRES HUMAN ACTION NOW]');
+    return output.includes('[REQUIRES HUMAN APPROVAL]') || output.includes('[REQUIRES HUMAN ACTION NOW]');
   }
 
-  private extractAndRegisterRisks(
-    output: string,
-    workflowId: string,
-    agentName: string
-  ): void {
+  private extractAndRegisterRisks(output: string, workflowId: string, agentName: string): void {
     if (!this.config.enableRiskRegister) return;
 
-    const riskPattern = /\[RISK\]\s+(.+?)(?=\[|$)/gs;
-    const criticalPattern = /CRITICAL[:\s]+(.+?)(?=\n\n|\n#|$)/gs;
-
     const risks = [
-      ...[...output.matchAll(riskPattern)].map(m => ({
+      ...[...output.matchAll(/\[RISK\]\s+(.+?)(?=\[|$)/gs)].map(m => ({
         severity: 'medium' as const,
         description: m[1].trim().slice(0, 200),
         mitigation: 'Review and mitigate',
         owner: agentName,
       })),
-      ...[...output.matchAll(criticalPattern)].map(m => ({
+      ...[...output.matchAll(/CRITICAL[:\s]+(.+?)(?=\n\n|\n#|$)/gs)].map(m => ({
         severity: 'critical' as const,
         description: m[1].trim().slice(0, 200),
         mitigation: 'Immediate human review required',

@@ -83,10 +83,36 @@ if [[ -f ".env" ]]; then
   set -a; source .env 2>/dev/null || true; set +a
 fi
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" ]] || [[ "${ANTHROPIC_API_KEY:-}" == "sk-ant-api03-..." ]]; then
-  warn "ANTHROPIC_API_KEY is not set in .env"
-  warn "The admin UI will start but workflows will fail until the key is configured."
-  echo ""
+LLM_PROVIDER_ACTIVE="${LLM_PROVIDER:-anthropic}"
+
+if [[ "$LLM_PROVIDER_ACTIVE" == "anthropic" ]]; then
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]] || [[ "${ANTHROPIC_API_KEY:-}" == "sk-ant-api03-..." ]]; then
+    warn "ANTHROPIC_API_KEY is not set in .env"
+    warn "The admin UI will start but workflows will fail until the key is configured."
+    echo ""
+  else
+    ok "Anthropic provider active"
+  fi
+elif [[ "$LLM_PROVIDER_ACTIVE" == "ollama" ]]; then
+  OLLAMA_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
+  log "Checking Ollama at $OLLAMA_URL..."
+  if curl -sf "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+    OLLAMA_MODELS=$(curl -sf "${OLLAMA_URL}/api/tags" 2>/dev/null | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"//' | tr '\n' ' ' || true)
+    ok "Ollama reachable → models: ${OLLAMA_MODELS:-none pulled}"
+  else
+    warn "Ollama not reachable at $OLLAMA_URL"
+    warn "Start Ollama with: ollama serve"
+    warn "Pull a model with: ollama pull ${OLLAMA_MODEL:-glm4:latest}"
+    echo ""
+  fi
+elif [[ "$LLM_PROVIDER_ACTIVE" == "nvidia" ]]; then
+  if [[ -z "${NVIDIA_API_KEY:-}" ]] || [[ "${NVIDIA_API_KEY:-}" == "nvapi-..." ]]; then
+    warn "NVIDIA_API_KEY is not set in .env"
+    warn "The admin UI will start but workflows will fail until the key is configured."
+    echo ""
+  else
+    ok "NVIDIA NIM provider active"
+  fi
 fi
 
 # ── 3. Install root dependencies ──────────────────────────────────────────────

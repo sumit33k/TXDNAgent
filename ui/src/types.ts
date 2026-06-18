@@ -60,7 +60,10 @@ export interface RiskEntry {
   status: 'open' | 'mitigated' | 'accepted' | 'closed';
 }
 
+export type LlmProviderKind = 'anthropic' | 'ollama' | 'nvidia';
+
 export interface SystemConfig {
+  llmProvider: LlmProviderKind;
   orchestratorModel: string;
   specialistModel: string;
   reviewerModel: string;
@@ -71,6 +74,13 @@ export interface SystemConfig {
   maxAgentTurns: number;
   txdnaRepoPath: string;
   enterpriseOsRepoPath: string;
+}
+
+export interface ProviderStatus {
+  provider: LlmProviderKind;
+  ollamaReachable: boolean;
+  ollamaModels: string[];
+  ollamaBaseUrl: string;
 }
 
 export interface Toast {
