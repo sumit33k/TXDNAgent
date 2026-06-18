@@ -146,6 +146,7 @@ export interface AgentConfig {
 }
 
 export interface OrchestratorConfig {
+  llmProvider?: import('./llm/types.js').LlmProviderKind;
   orchestratorModel: string;
   specialistModel: string;
   reviewerModel: string;

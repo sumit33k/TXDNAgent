@@ -25,6 +25,7 @@ import { runImplementationPlanningWorkflow } from './agents/workflows/implementa
 import { runSecurityReviewWorkflow } from './agents/workflows/security-review-workflow.js';
 import { loadRiskRegister } from './agents/tools/risk-register.js';
 import { getOrchestratorConfig } from './agents/config.js';
+import { listOllamaModels, isOllamaReachable } from './agents/llm/provider-factory.js';
 
 // ── In-memory state (use a real DB in production) ────────────────────────────
 const agentConfigOverrides = new Map<string, Record<string, unknown>>();
@@ -196,9 +197,25 @@ const server = http.createServer(async (req, res) => {
       return respond(res, 200, loadRiskRegister());
     }
 
+    // GET /api/provider/status
+    if (method === 'GET' && path === '/api/provider/status') {
+      const ollamaBase = process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
+      const [reachable, models] = await Promise.all([
+        isOllamaReachable(ollamaBase),
+        listOllamaModels(ollamaBase),
+      ]);
+      return respond(res, 200, {
+        provider: systemConfig.llmProvider ?? process.env.LLM_PROVIDER ?? 'anthropic',
+        ollamaReachable: reachable,
+        ollamaModels: models,
+        ollamaBaseUrl: ollamaBase,
+      });
+    }
+
     // GET /api/config
     if (method === 'GET' && path === '/api/config') {
       return respond(res, 200, {
+        llmProvider: systemConfig.llmProvider ?? process.env.LLM_PROVIDER ?? 'anthropic',
         orchestratorModel: systemConfig.orchestratorModel,
         specialistModel: systemConfig.specialistModel,
         reviewerModel: systemConfig.reviewerModel,
